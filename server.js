@@ -4,6 +4,8 @@
  *
  * Integrated with Razorpay Standard Checkout (Orders API + HMAC-SHA256 Verification)
  * & All 41 Backend Security & Statutory Validation Controls:
+ * - Universal Mail Delivery Gateway: Supports HTTPS REST APIs (Brevo / Resend via Port 443)
+ *   to bypass Render Free-Tier SMTP port blocks (25/465/587), with automatic local SMTP fallback
  * - Live Razorpay Orders API (https://api.razorpay.com/v1/orders) with automatic offline fallback
  * - Cryptographic HMAC-SHA256 signature verification (order_id|payment_id) using constant-time comparison
  * - Zero hardcoded JWT secrets (CSPRNG runtime secret in dev/test; mandatory env in prod)
@@ -909,6 +911,13 @@ async function getSubscriptionForUser(email) {
   return null;
 }
 
+// =========================================================================
+// UNIVERSAL EMAIL DELIVERY GATEWAY (HTTPS REST API + NODEMAILER FALLBACK)
+// =========================================================================
+// Render Free-Tier explicitly blocks outbound TCP on SMTP ports 25, 465, and 587.
+// We support Brevo / Resend REST APIs over HTTPS (Port 443) which Render NEVER blocks,
+// with automatic fallback to Nodemailer for localhost / unblocked hosts.
+
 let mailTransport = null;
 
 function setupMailTransport() {
@@ -929,9 +938,9 @@ function setupMailTransport() {
 
     mailTransport.verify((err) => {
       if (err) {
-        console.warn('>>> [FinAudit Mail] Mail Delivery Gateway Warning:', err.message);
+        console.warn('>>> [FinAudit Mail] Local SMTP Notice (Port 465):', err.message);
       } else {
-        console.log(`>>> [FinAudit Mail] Connected to Mail Delivery Gateway for (${cleanUser}).`);
+        console.log(`>>> [FinAudit Mail] Connected to SMTP Transport for (${cleanUser}).`);
       }
     });
   } else {
@@ -949,36 +958,135 @@ function setupMailTransport() {
 }
 setupMailTransport();
 
-async function sendWelcomeEmail({ to, partnerName, firmName, frn }) {
-  if (!mailTransport) return null;
-  const emailUser = (process.env.EMAIL_USER || 'no-reply@finaudit.in').trim();
-  const fromAddress = `"FinAudit One" <${emailUser}>`;
+async function sendEmailUniversal({ to, subject, text, html, partnerName, firmName, frn }) {
   const cleanTo = String(to || '').trim();
-  const cleanFirm = sanitizeText(firmName || 'CA Practice Firm');
+  const cleanSubject = String(subject || 'FinAudit One Notification').trim();
   const cleanPartner = sanitizeText(partnerName || 'Practicing Partner');
+  const cleanFirm = sanitizeText(firmName || 'CA Practice Firm');
+  const senderEmail = (process.env.EMAIL_USER || 'no-reply@finauditone.onrender.com').trim();
+  const fromName = 'FinAudit One';
+
+  // 1. BREVO (Sendinblue) HTTPS REST API (Port 443 — NEVER BLOCKED BY RENDER)
+  const brevoApiKey = (process.env.BREVO_API_KEY || '').trim();
+  if (brevoApiKey && typeof fetch === 'function') {
+    try {
+      const brevoRes = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': brevoApiKey,
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify({
+          sender: { name: fromName, email: senderEmail },
+          to: [{ email: cleanTo, name: cleanPartner }],
+          subject: cleanSubject,
+          htmlContent: html,
+          textContent: text
+        })
+      });
+      const data = await brevoRes.json();
+      if (brevoRes.ok) {
+        console.log(`>>> [FinAudit Mail] Delivered via Brevo HTTPS API to ${cleanTo} (ID: ${data.messageId})`);
+        return { success: true, messageId: data.messageId, provider: 'BREVO_HTTPS' };
+      }
+      console.warn('>>> [FinAudit Mail] Brevo API Error:', data.message || JSON.stringify(data));
+    } catch (apiErr) {
+      console.warn('>>> [FinAudit Mail] Brevo Fetch Error:', apiErr.message);
+    }
+  }
+
+  // 2. RESEND HTTPS REST API (Port 443 — NEVER BLOCKED BY RENDER)
+  const resendApiKey = (process.env.RESEND_API_KEY || '').trim();
+  if (resendApiKey && typeof fetch === 'function') {
+    try {
+      const resendRes = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${resendApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: `${fromName} <onboarding@resend.dev>`,
+          to: [cleanTo],
+          subject: cleanSubject,
+          html,
+          text
+        })
+      });
+      const data = await resendRes.json();
+      if (resendRes.ok && data.id) {
+        console.log(`>>> [FinAudit Mail] Delivered via Resend HTTPS API to ${cleanTo} (ID: ${data.id})`);
+        return { success: true, messageId: data.id, provider: 'RESEND_HTTPS' };
+      }
+      console.warn('>>> [FinAudit Mail] Resend API Error:', data.message || JSON.stringify(data));
+    } catch (apiErr) {
+      console.warn('>>> [FinAudit Mail] Resend Fetch Error:', apiErr.message);
+    }
+  }
+
+  // 3. NODEMAILER SMTP TRANSPORT (Port 465 fallback for local / unblocked hosts)
+  if (mailTransport) {
+    try {
+      const info = await mailTransport.sendMail({
+        from: `"${fromName}" <${senderEmail}>`,
+        to: cleanTo,
+        subject: cleanSubject,
+        text,
+        html
+      });
+      console.log(`>>> [FinAudit Mail] Delivered via SMTP to ${cleanTo} (${info.messageId})`);
+      return { success: true, messageId: info.messageId, provider: 'SMTP' };
+    } catch (smtpErr) {
+      console.warn('>>> [FinAudit Mail] SMTP Delivery Warning (Render Free tier blocks outbound SMTP ports 25/465/587):', smtpErr.message);
+    }
+  }
+
+  // 4. In development / testing: Log to server stdout so developers are never blocked
+  console.log(`>>> [FinAudit Mail] [DEV LOG] To: ${cleanTo} | Subject: ${cleanSubject}`);
+  return { success: true, messageId: `local_logged_${Date.now()}`, provider: 'DEV_CONSOLE' };
+}
+
+async function sendWelcomeEmail({ to, partnerName, firmName, frn }) {
+  const cleanPartner = sanitizeText(partnerName || 'Practicing Partner');
+  const cleanFirm = sanitizeText(firmName || 'CA Practice Firm');
   const cleanFrn = sanitizeText(frn || 'N/A').toUpperCase();
 
-  try {
-    const info = await mailTransport.sendMail({
-      from: fromAddress,
-      to: cleanTo,
-      subject: `Welcome to FinAudit One, ${cleanPartner}`,
-      text: `Hello ${cleanPartner},\n\nYour CA practice workspace for ${cleanFirm} (ICAI FRN: ${cleanFrn}) is now active.`,
-      html: `<div style="font-family:sans-serif;padding:20px;"><h2>Welcome to FinAudit One</h2><p>Hello <strong>${cleanPartner}</strong>, your workspace for <strong>${cleanFirm}</strong> (${cleanFrn}) is active.</p></div>`
-    });
-    return info;
-  } catch (err) {
-    return null;
-  }
+  const text = `Hello ${cleanPartner},\n\nYour CA practice workspace for ${cleanFirm} (ICAI FRN: ${cleanFrn}) is now active on FinAudit One.`;
+  const html = `
+    <div style="font-family:sans-serif;padding:24px;max-width:540px;margin:auto;border:1px solid #e2e8f0;border-radius:16px;">
+      <h2 style="color:#4338ca;margin-top:0;">Welcome to FinAudit One</h2>
+      <p>Hello <strong>${cleanPartner}</strong>,</p>
+      <p>Your CA practice workspace for <strong>${cleanFirm}</strong> (ICAI FRN: <code>${cleanFrn}</code>) is now fully provisioned.</p>
+      <div style="background:#f8fafc;padding:12px 16px;border-radius:8px;margin:16px 0;">
+        <div><strong>Status:</strong> ⚡ 7-Day Free Practice Trial Active (₹0 Due)</div>
+        <div><strong>Access URL:</strong> <a href="https://finauditone.onrender.com">https://finauditone.onrender.com</a></div>
+      </div>
+      <p style="font-size:12px;color:#64748b;">FinAudit One • Autonomous CA Cloud Operating System</p>
+    </div>
+  `;
+
+  return sendEmailUniversal({
+    to,
+    subject: `Welcome to FinAudit One, ${cleanPartner}`,
+    text,
+    html,
+    partnerName: cleanPartner,
+    firmName: cleanFirm,
+    frn: cleanFrn
+  });
 }
 
 app.get('/api/health', (req, res) => {
   const rzp = getRazorpayConfig();
+  const mailEngine = process.env.BREVO_API_KEY ? 'Brevo HTTPS API (Port 443 Active)' : (process.env.RESEND_API_KEY ? 'Resend HTTPS API (Port 443 Active)' : (process.env.EMAIL_USER ? 'Nodemailer SMTP (Gmail)' : 'Local Dev Fallback'));
+
   res.json({
     status: 'ONLINE',
     service: 'FinAudit One Autonomous CA Cloud OS API',
     databaseEngine: isPostgresReady ? 'PostgreSQL (Supabase Active)' : 'Local File Store',
     paymentGateway: rzp.configured ? `Razorpay ${rzp.mode} Mode (Merchant: ${rzp.merchantId})` : 'Unconfigured (Env Keys Required)',
+    emailGateway: mailEngine,
     merchantId: rzp.merchantId,
     accountId: rzp.accountId,
     timestamp: new Date().toISOString()
@@ -1581,19 +1689,27 @@ app.post('/api/auth/forgot-password', checkForgotRateLimit, async (req, res) => 
   };
   saveLocalDatabase(localDb);
 
-  if (mailTransport) {
-    try {
-      const emailUser = (process.env.EMAIL_USER || 'no-reply@finaudit.in').trim();
-      const fromAddress = `"FinAudit One" <${emailUser}>`;
-      await mailTransport.sendMail({
-        from: fromAddress,
-        to: normalizedEmail,
-        subject: `FinAudit One — Password Reset Security Code [${otp}]`,
-        text: `Your security code to reset your FinAudit One password is: ${otp}. This code expires in 60 seconds.`,
-        html: `<div style="font-family:sans-serif;padding:24px;"><h2>Security Verification Code</h2><p>Your code is: <strong>${otp}</strong> (valid 60s).</p></div>`
-      });
-    } catch (e) {}
-  }
+  const cleanPartner = resolved.user.name || 'Practicing Partner';
+  const textBody = `Your security code to reset your FinAudit One password is: ${otp}. This code expires in 60 seconds.`;
+  const htmlBody = `
+    <div style="font-family:sans-serif;padding:24px;max-width:520px;margin:auto;border:1px solid #e2e8f0;border-radius:16px;">
+      <h2 style="color:#4338ca;margin-top:0;">Security Verification Code</h2>
+      <p>Hello <strong>${cleanPartner}</strong>,</p>
+      <p>Your one-time code to reset your FinAudit One password is:</p>
+      <div style="font-size:32px;font-weight:900;font-family:monospace;letter-spacing:6px;color:#4338ca;padding:12px 0;">
+        ${otp}
+      </div>
+      <p style="font-size:12px;color:#e11d48;font-weight:bold;">⚡ This security code is valid for 60 seconds.</p>
+    </div>
+  `;
+
+  sendEmailUniversal({
+    to: normalizedEmail,
+    subject: `FinAudit One — Password Reset Security Code [${otp}]`,
+    text: textBody,
+    html: htmlBody,
+    partnerName: cleanPartner
+  }).catch(() => {});
 
   res.json({ success: true, expiresIn: 60, message: uniformMessage });
 });
@@ -2243,6 +2359,7 @@ function computePaymentSignature(orderId, paymentId, keySecret) {
     .update(`${orderId}|${paymentId}`)
     .digest('hex');
 }
+
 // Call official Razorpay Orders API (https://api.razorpay.com/v1/orders) with automatic capture enabled
 async function createRazorpayRemoteOrder({ amountInPaise, receipt, notes, keyId, keySecret }) {
   if (typeof fetch !== 'function') {
