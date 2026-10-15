@@ -1,0 +1,37 @@
+services:
+
+type: web
+name: finaudit-one
+env: node
+plan: free
+buildCommand: npm install
+startCommand: node server.js
+healthCheckPath: /api/health
+envVars:
+
+key: NODE_ENV
+value: production
+
+key: JWT_SECRET
+generateValue: true
+
+key: RAZORPAY_MERCHANT_ID
+value: RJyqo7o2wrDfNg
+
+key: RAZORPAY_ACCOUNT_ID
+value: acc_RJyqo7o2wrDfNg
+
+key: RAZORPAY_KEY_ID
+sync: false
+
+key: RAZORPAY_KEY_SECRET
+sync: false
+
+key: DATABASE_URL
+sync: false
+
+key: EMAIL_USER
+sync: false
+
+key: EMAIL_PASS
+sync: false
