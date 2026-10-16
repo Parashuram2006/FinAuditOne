@@ -50,7 +50,7 @@
       .no-print {
         display: none !important;
       }
-       */ INVOICE PRINT MODE */
+      <!-- 1. INVOICE PRINT MODE */
       body.printing-invoice #view-landing,
       body.printing-invoice #view-app,
       body.printing-invoice #plan-picker-modal,
@@ -1893,8 +1893,8 @@
     if (!s || s === 'UNDEFINED' || s === 'NULL') return '';
     // Strip standard document prefixes
     s = s.replace(/^(INVOICE|INV|BILL|TAX|GSTIN|GST|SALES|PURCHASE|PUR|REF|MEMO|VOUCHER|VCH|CN|DN|CRN|DBN)[\s\/\-_#.]*/i, '');
-    // Strip embedded or trailing FY tokens like 2025-26, 2026-27, FY26-27, /26-27
-    s = s.replace(/(?:^|[\/\-_\s])(?:FY\s*)?20\d{2}[\-\/]\d{2,4}(?=$|[\/\-_\s])/gi, '');
+    // Strip embedded or trailing FY tokens like 2025-26, 2026-27, FY26-27, /26-27, or standalone year prefix 2026/
+    s = s.replace(/(?:^|[\/\-_\s])(?:FY\s*)?20\d{2}(?:[\-\/]\d{2,4})?(?=$|[\/\-_\s])/gi, '');
     s = s.replace(/^[\/\-_\s]+|[\/\-_\s]+$/g, '');
     // Collapse non-alphanumeric characters
     const alnum = s.replace(/[^A-Z0-9]/g, '');
